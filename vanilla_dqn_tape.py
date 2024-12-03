@@ -111,45 +111,36 @@ class VanillaDQN(Agent):
         rewards = tf.constant([reward for _, _, reward, _, _ in minibatch], dtype=tf.float32)
         next_states = tf.stack([next_state for _, _, _, next_state, _ in minibatch])
         dones = tf.stack([done for _, _, _, _, done in minibatch])
+            
+       # Compute Q-value targets
+        if self.ddqn:
+            next_q_values_online = tf.convert_to_tensor(self.model.predict(next_states, verbose=0), dtype=tf.float32)
+            next_q_values_target = tf.convert_to_tensor(self.target_model.predict(next_states, verbose=0), dtype=tf.float32)
+            best_next_actions = tf.argmax(next_q_values_online, axis=1)
+            max_next_q_values = tf.gather(next_q_values_target, best_next_actions, batch_dims=1)
+        else:
+            next_q_values = tf.convert_to_tensor(self.target_model.predict(next_states, verbose=0), dtype=tf.float32)
+            max_next_q_values = tf.reduce_max(next_q_values, axis=1)
+
         if(self.per):
             weights = self.update_priorities()  # Update priorities based on errors
             weights_tensor = tf.convert_to_tensor(weights, dtype=tf.float32)
-            
+        # Calculate the targets
+        targets = rewards + (1 - tf.cast(dones, tf.float32)) * self.gamma * max_next_q_values
+
+        # Perform gradient descent using gradient tape
         with tf.GradientTape() as tape:
-            # Get q_values that the primary model predicts for current states
-            target_q_values = self.model(states, training=True)  # Use direct call to the model, avoid `predict`
-
-            # Convert predictions to tensors
-            target_q_values = tf.gather(target_q_values, actions, batch_dims=1)
-
-            if self.ddqn:
-                # Get Q-values that the online and target models predict for next states
-                next_q_values_online = self.model(next_states, training=False)  # Online model for action selection
-                next_q_values_target = self.target_model(next_states, training=False)  # Target model for value evaluation
-                
-                # Action selection using the online model
-                best_next_actions = tf.argmax(next_q_values_online, axis=1)
-
-                # Action evaluation using the target model
-                max_next_q_values = tf.gather(next_q_values_target, best_next_actions, batch_dims=1)
+            # Predict Q-values for current states
+            q_values = self.model(states, training=True)
+            # Gather the Q-values for the actions taken
+            q_values_actions = tf.gather(q_values, actions, batch_dims=1)
+            if(self.per):
+                loss = tf.reduce_sum(weights_tensor * (targets - q_values_actions)** 2)
             else:
-                # Get q_values that the target model predicts for next states
-                next_q_values = self.target_model(next_states, training=False)
-
-                # Calculate the targets
-                max_next_q_values = tf.reduce_max(next_q_values, axis=1)
-                
-            # Calculate the targets
-            targets = rewards + (1 - tf.cast(dones, tf.float32)) * self.gamma * max_next_q_values
-
-            # Use PER (if applicable)
-            if self.per:
-                tape_loss = tf.reduce_sum(weights_tensor * (target_q_values - tf.squeeze(targets)) ** 2)
-            else:
-                tape_loss = tf.reduce_mean(tf.square(target_q_values - tf.squeeze(targets)))
-
+                # Compute the loss
+                loss = tf.reduce_mean(tf.square(targets - q_values_actions))
         # Compute gradients of the loss with respect to the model's trainable variables
-        gradients = tape.gradient(tape_loss, self.model.trainable_variables)
+        gradients = tape.gradient(loss, self.model.trainable_variables)
 
         # Apply the gradients to the model
         self.optimizer.apply_gradients(zip(gradients, self.model.trainable_variables))
